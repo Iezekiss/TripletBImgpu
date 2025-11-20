@@ -1,0 +1,127 @@
+# ====================================== AIRFLOW ENVIRONMENT VARIABLES =======================================
+x-environment: &airflow_environment
+  - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+  - AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS=False
+  - AIRFLOW__CORE__LOAD_EXAMPLES=False
+  - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql://airflow:airflow@postgres:5432/airflow
+  - AIRFLOW__CORE__STORE_DAG_CODE=True
+  - AIRFLOW__CORE__STORE_SERIALIZED_DAGS=True
+  - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+  - AIRFLOW__WEBSERVER__RBAC=False
+x-airflow-image: &airflow_image
+  build: .
+# ====================================== /AIRFLOW ENVIRONMENT VARIABLES ======================================
+
+services:
+  # PostgreSQL for Airflow metadata
+  postgres:
+    image: postgres:12-alpine
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # PostgreSQL for analytical data
+  analytics_postgres:
+    image: postgres:12-alpine
+    environment:
+      - POSTGRES_USER=analytics
+      - POSTGRES_PASSWORD=analytics
+      - POSTGRES_DB=analytics
+    ports:
+      - "5433:5432"
+    volumes:
+      - analytics_postgres_data:/var/lib/postgresql/data
+
+  # Redis for Superset
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Superset
+  superset:
+    build:
+      context: .
+      dockerfile: superset.Dockerfile
+    ports:
+      - "8088:8088"
+    environment:
+      - SUPERSET_SECRET_KEY=your-secret-key-here
+      - SUPERSET_DATABASE_URL=postgresql://analytics:analytics@analytics_postgres:5432/analytics
+    volumes:
+      - superset_data:/app/superset_home
+    depends_on:
+      - analytics_postgres
+      - redis
+    command: >
+      sh -c "
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Admin --lastname User --email admin@example.com --password admin &&
+        superset init &&
+        superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+      "
+
+  # pgAdmin
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    ports:
+      - "5050:80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - analytics_postgres
+
+  # Airflow initialization
+  init:
+    <<: *airflow_image
+    depends_on:
+      - postgres
+    environment: *airflow_environment
+    entrypoint: /bin/bash
+    command: -c 'pip install pandas kaggle kagglehub psycopg2-binary apache-airflow-providers-postgres && airflow db upgrade && sleep 5 && airflow users create --username admin --password admin --firstname Anonymous --lastname Admin --role Admin --email admin@example.org'
+
+  # Airflow webserver
+  webserver:
+    <<: *airflow_image
+    restart: always
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+    volumes:
+      - logs:/opt/airflow/logs
+      - ./dags:/opt/airflow/dags
+      - ./dags/.kaggle:/home/airflow/.kaggle
+    environment: *airflow_environment
+    entrypoint: /bin/bash
+    command: -c 'pip install pandas kaggle kagglehub psycopg2-binary apache-airflow-providers-postgres && airflow webserver'
+
+  # Airflow scheduler
+  scheduler:
+    <<: *airflow_image
+    restart: always
+    depends_on:
+      - postgres
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - logs:/opt/airflow/logs
+      - ./dags/.kaggle:/home/airflow/.kaggle
+    environment: *airflow_environment
+    entrypoint: /bin/bash
+    command: -c 'pip install pandas kaggle kagglehub psycopg2-binary apache-airflow-providers-postgres && airflow scheduler'
+
+
+volumes:
+  logs:
+  postgres_data:
+  analytics_postgres_data:
+  superset_data:
+  pgadmin_data:
